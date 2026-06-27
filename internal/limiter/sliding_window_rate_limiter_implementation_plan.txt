@@ -1,0 +1,360 @@
+Sliding Window Rate Limiter - Detailed Implementation Plan
+
+Goal
+
+Implement a Sliding Window Rate Limiter that allows at most L requests
+within the last W time duration for each user.
+
+Example: - Limit = 5 requests - Window = 60 seconds
+
+If a user has already made 5 requests in the last 60 seconds, the next
+request is rejected.
+
+------------------------------------------------------------------------
+
+High-Level Idea
+
+Instead of maintaining only a counter, maintain the timestamp of every
+accepted request.
+
+For each incoming request:
+
+1.  Find the user’s request history.
+2.  Remove timestamps that are outside the current window.
+3.  Count remaining timestamps.
+4.  If count >= limit:
+    -   Reject request.
+5.  Otherwise:
+    -   Add current timestamp.
+    -   Allow request.
+
+------------------------------------------------------------------------
+
+Data Structures
+
+For each user maintain a queue of timestamps.
+
+Conceptually:
+
+    users
+    │
+    ├── alice
+    │     10:01
+    │     10:08
+    │     10:15
+    │
+    ├── bob
+    │     10:04
+    │     10:09
+    │
+    └── charlie
+          10:11
+
+Go representation:
+
+    type SlidingWindowLimiter struct {
+        limit  int
+        window time.Duration
+
+        users map[string][]time.Time
+
+        mu sync.Mutex
+    }
+
+------------------------------------------------------------------------
+
+Step-by-Step Algorithm
+
+Input: - userID - currentTime
+
+Output: - true -> request allowed - false -> request rejected
+
+------------------------------------------------------------------------
+
+Step 1
+
+Acquire mutex.
+
+Purpose: Prevent concurrent goroutines from modifying the map
+simultaneously.
+
+Pseudo:
+
+    lock mutex
+
+------------------------------------------------------------------------
+
+Step 2
+
+Read current time.
+
+    currentTime = now()
+
+------------------------------------------------------------------------
+
+Step 3
+
+Find user’s timestamp list.
+
+    timestamps = users[userID]
+
+If user does not exist:
+
+    timestamps = empty list
+
+------------------------------------------------------------------------
+
+Step 4
+
+Compute the beginning of the sliding window.
+
+    cutoff = currentTime - window
+
+Example
+
+Current time:
+
+    100 sec
+
+Window:
+
+    30 sec
+
+Cutoff:
+
+    70 sec
+
+Any request older than 70 seconds should be removed.
+
+------------------------------------------------------------------------
+
+Step 5
+
+Find expired timestamps.
+
+Pseudo:
+
+    index = 0
+
+    while index < timestamps.length
+          and timestamps[index] < cutoff
+
+          index++
+
+Example
+
+Stored timestamps
+
+    10
+    25
+    60
+    71
+    85
+    95
+
+Current time
+
+    100
+
+Window
+
+    30
+
+Cutoff
+
+    70
+
+Expired
+
+    10
+    25
+    60
+
+Valid
+
+    71
+    85
+    95
+
+Index becomes
+
+    3
+
+------------------------------------------------------------------------
+
+Step 6
+
+Discard expired timestamps.
+
+Instead of deleting one-by-one:
+
+    timestamps = timestamps[index:]
+
+Why?
+
+Deleting repeatedly shifts every element.
+
+Reslicing is much cheaper.
+
+Now
+
+    71
+    85
+    95
+
+remain.
+
+------------------------------------------------------------------------
+
+Step 7
+
+Check current request count.
+
+    if timestamps.length >= limit
+
+        reject
+
+Example
+
+Limit
+
+    3
+
+Current list
+
+    71
+    85
+    95
+
+Length
+
+    3
+
+Reject.
+
+------------------------------------------------------------------------
+
+Step 8
+
+Accept request.
+
+Append current timestamp.
+
+    timestamps.append(currentTime)
+
+Example
+
+Before
+
+    71
+    85
+
+Current
+
+    100
+
+After
+
+    71
+    85
+    100
+
+------------------------------------------------------------------------
+
+Step 9
+
+Store updated queue.
+
+    users[userID] = timestamps
+
+------------------------------------------------------------------------
+
+Step 10
+
+Release mutex.
+
+    unlock mutex
+
+Return
+
+    true
+
+------------------------------------------------------------------------
+
+Complete Pseudocode
+
+    Allow(userID)
+
+    lock mutex
+
+    currentTime = now()
+
+    timestamps = users[userID]
+
+    cutoff = currentTime - window
+
+    index = 0
+
+    while index < timestamps.length
+
+        if timestamps[index] >= cutoff
+
+            break
+
+        index++
+
+    timestamps = timestamps[index:]
+
+    if timestamps.length >= limit
+
+        users[userID] = timestamps
+
+        unlock mutex
+
+        return false
+
+    timestamps.append(currentTime)
+
+    users[userID] = timestamps
+
+    unlock mutex
+
+    return true
+
+------------------------------------------------------------------------
+
+Time Complexity
+
+Let: - n = number of timestamps stored for one user - k = number of
+expired timestamps removed
+
+Per request: - Removing expired timestamps: O(k) - Appending new
+timestamp: O(1)
+
+Average performance is typically close to O(1) because old timestamps
+are continuously discarded.
+
+------------------------------------------------------------------------
+
+Space Complexity
+
+Per user:
+
+    O(limit)
+
+since requests older than the window are removed.
+
+Worst case:
+
+    O(number_of_active_users × limit)
+
+------------------------------------------------------------------------
+
+Production Improvements
+
+1.  Replace slices with a queue or ring buffer.
+2.  Use per-user locks instead of one global mutex.
+3.  Add cleanup of inactive users.
+4.  Replace in-memory storage with Redis for distributed deployments.
+5.  Export metrics (allowed, blocked, active users).
+6.  Benchmark and profile performance.
