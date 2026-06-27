@@ -1,0 +1,473 @@
+Token Bucket Rate Limiter - Complete Implementation Roadmap
+
+========================================================= PROJECT GOAL
+=========================================================
+
+Build a production-quality Token Bucket Rate Limiter that:
+
+-   Implements the existing Limiter interface
+-   Supports multiple users
+-   Is thread-safe
+-   Uses lazy token refill
+-   Cleans inactive buckets
+-   Uses an injectable clock for deterministic tests
+-   Includes metrics
+-   Includes benchmarks
+-   Is easy to extend to Redis in the next phase
+
+========================================================= PROJECT
+STRUCTURE =========================================================
+
+internal/ │ ├── limiter/ │ ├── limiter.go │ ├── clock.go │ ├──
+token_bucket.go │ ├── cleanup.go │ ├── metrics.go │ ├──
+token_bucket_test.go │ └── benchmark_test.go
+
+========================================================= STEP 1 -
+UNDERSTAND THE TOKEN BUCKET MODEL
+=========================================================
+
+Imagine each user owns a bucket.
+
+Bucket Capacity = Maximum burst allowed.
+
+Refill Rate = Tokens generated every second.
+
+Each request consumes one token.
+
+If bucket has no token: Reject request.
+
+If bucket has one or more tokens: Consume one token. Allow request.
+
+Example
+
+Capacity = 10 Rate = 2 tokens/sec
+
+Initial bucket
+
+[10]
+
+Request ↓
+
+[9]
+
+User waits 3 seconds
+
+Generated Tokens
+
+3 × 2 = 6
+
+Bucket
+
+min(9+6,10)=10
+
+========================================================= STEP 2 -
+DEFINE THE CLOCK ABSTRACTION
+=========================================================
+
+Never call time.Now() directly.
+
+Create:
+
+type Clock interface { Now() time.Time }
+
+RealClock: Returns time.Now()
+
+FakeClock: Maintains an internal time value.
+
+Methods
+
+Now()
+
+Advance(duration)
+
+Advantages
+
+-   deterministic tests
+-   no time.Sleep()
+-   easier debugging
+-   production-quality design
+
+========================================================= STEP 3 -
+DESIGN THE BUCKET
+=========================================================
+
+Each bucket stores:
+
+Tokens
+
+Current available tokens.
+
+Capacity
+
+Maximum number of tokens.
+
+RefillRate
+
+Tokens generated per second.
+
+LastRefill
+
+Last instant refill calculation happened.
+
+LastAccess
+
+Last request time. Used by cleanup.
+
+Pseudo
+
+Bucket
+
+Tokens Capacity RefillRate LastRefill LastAccess
+
+========================================================= STEP 4 -
+DESIGN THE LIMITER
+=========================================================
+
+Limiter owns
+
+map[userID]*Bucket
+
+Configuration
+
+capacity
+
+refillRate
+
+clock
+
+mutex
+
+Pseudo
+
+TokenBucketLimiter
+
+Buckets
+
+Capacity
+
+RefillRate
+
+Clock
+
+RWMutex
+
+========================================================= STEP 5 -
+BUCKET CREATION
+=========================================================
+
+Algorithm
+
+Receive request
+
+↓
+
+Find bucket
+
+↓
+
+Exists?
+
+No
+
+Create bucket
+
+Tokens = Capacity
+
+LastRefill = now
+
+LastAccess = now
+
+Store bucket
+
+========================================================= STEP 6 - LAZY
+REFILL =========================================================
+
+Never refill continuously.
+
+Refill only when a request arrives.
+
+Algorithm
+
+elapsed = now - lastRefill
+
+generatedTokens = elapsedSeconds × refillRate
+
+tokens = tokens + generatedTokens
+
+if tokens > capacity
+
+    tokens = capacity
+
+lastRefill = now
+
+Pseudo
+
+elapsed
+
+generated
+
+tokens += generated
+
+tokens = min(tokens, capacity)
+
+lastRefill = now
+
+Example
+
+Capacity = 10
+
+Current tokens = 3
+
+Rate = 2/sec
+
+Elapsed = 4 sec
+
+Generated
+
+8
+
+Total
+
+11
+
+Clamp
+
+10
+
+========================================================= STEP 7 -
+REQUEST PROCESSING
+=========================================================
+
+Pseudo
+
+Allow(userID)
+
+Lock
+
+Find bucket
+
+If bucket missing
+
+Create bucket
+
+Refill bucket
+
+Update LastAccess
+
+If tokens >= 1
+
+tokens–
+
+Unlock
+
+Return true
+
+Unlock
+
+Return false
+
+========================================================= STEP 8 -
+COMPLETE PSEUDOCODE
+=========================================================
+
+Allow(userID)
+
+lock
+
+now = clock.Now()
+
+bucket = buckets[userID]
+
+if bucket missing
+
+    bucket = new bucket
+
+    bucket.tokens = capacity
+
+    bucket.lastRefill = now
+
+    bucket.lastAccess = now
+
+elapsed = now - bucket.lastRefill
+
+generated = elapsed.seconds * refillRate
+
+bucket.tokens += generated
+
+if bucket.tokens > capacity
+
+    bucket.tokens = capacity
+
+bucket.lastRefill = now
+
+bucket.lastAccess = now
+
+if bucket.tokens >= 1
+
+    bucket.tokens--
+
+    unlock
+
+    return true
+
+unlock
+
+return false
+
+========================================================= STEP 9 -
+CLEANUP INACTIVE USERS
+=========================================================
+
+Problem
+
+Inactive buckets stay in memory forever.
+
+Solution
+
+Track LastAccess.
+
+Every minute
+
+for each bucket
+
+if now - lastAccess > expiry
+
+delete bucket
+
+Run cleanup using a goroutine and ticker.
+
+========================================================= STEP 10 -
+IMPROVE LOCKING
+=========================================================
+
+Version 1
+
+Single mutex around entire limiter.
+
+Version 2
+
+Use RWMutex.
+
+Read path
+
+RLock
+
+Lookup bucket
+
+RUnlock
+
+If bucket absent
+
+Lock
+
+Create bucket
+
+Unlock
+
+Future improvement
+
+Store a mutex inside each bucket for per-user locking to reduce
+contention.
+
+========================================================= STEP 11 -
+METRICS =========================================================
+
+Track
+
+AllowedRequests
+
+BlockedRequests
+
+ActiveBuckets
+
+Expose through
+
+GET /metrics
+
+Useful for Grafana and Prometheus in later phases.
+
+========================================================= STEP 12 - UNIT
+TESTS =========================================================
+
+Write tests for
+
+1.  New bucket starts full.
+2.  Requests consume tokens.
+3.  Bucket becomes empty.
+4.  Request rejected when empty.
+5.  Refill after advancing FakeClock.
+6.  Capacity never exceeded.
+7.  Cleanup removes inactive buckets.
+8.  Concurrent requests.
+9.  Race detector passes.
+
+Commands
+
+go test ./…
+
+go test -race ./…
+
+========================================================= STEP 13 -
+BENCHMARKS =========================================================
+
+Implement
+
+BenchmarkFixedWindow
+
+BenchmarkSlidingWindow
+
+BenchmarkTokenBucket
+
+Run
+
+go test -bench=.
+
+go test -benchmem
+
+Compare
+
+ns/op
+
+allocs/op
+
+bytes/op
+
+========================================================= STEP 14 -
+COMPLEXITY =========================================================
+
+Lookup
+
+O(1)
+
+Refill
+
+O(1)
+
+Consume
+
+O(1)
+
+Memory
+
+O(active users)
+
+This is significantly more memory-efficient than Sliding Window because
+no request history is stored.
+
+========================================================= STEP 15 -
+GITHUB CHECKLIST
+=========================================================
+
+Completed
+
+[ ] Clock abstraction [ ] Token Bucket algorithm [ ] Lazy refill [ ]
+Thread-safe implementation [ ] Cleanup goroutine [ ] Metrics [ ]
+Middleware integration [ ] Unit tests [ ] Race tests [ ] Benchmarks [ ]
+README with algorithm explanation [ ] Performance comparison table
+
+========================================================= NEXT PHASE
+=========================================================
+
+After this implementation, the next milestone is replacing the in-memory
+map with Redis using atomic operations so multiple application instances
+can share rate-limit state behind a load balancer.
